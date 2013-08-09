@@ -19,5 +19,5 @@ class Test {
 $test = new Test();
 call_user_func_array(array($test, 'magic'), array('bur' => 'bar'));
 call_user_func_array(array($test, 'normal'), array('badum' => 'tss'));
-call_user_func_array('Test::hi', array('bleep', 'bloop')); 
+call_user_func_array('Test::hi', array('bleep', 'bloop'));
 $test->hi('hello world!');

@@ -21,6 +21,7 @@
 #include "hphp/util/exception.h"
 #include <errno.h>
 #include "hphp/util/util.h"
+#include "folly/String.h"
 #include <boost/aligned_storage.hpp>
 
 namespace HPHP {
@@ -55,20 +56,24 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // helper
 
+inline void ThreadLocalCheckReturn(int ret, const char *funcName) {
+  if (ret != 0) {
+    // This is used from global constructors so the safest thing to do is just
+    // print to stderr and exit().
+    fprintf(stderr, "%s returned %d: %s", funcName, ret,
+            folly::errnoStr(ret).c_str());
+    exit(1);
+  }
+}
+
 inline void ThreadLocalCreateKey(pthread_key_t *key, void (*del)(void*)) {
   int ret = pthread_key_create(key, del);
-  if (ret != 0) {
-    const char *msg = "(unknown error)";
-    switch (ret) {
-    case EAGAIN:
-      msg = "PTHREAD_KEYS_MAX (1024) is exceeded";
-      break;
-    case ENOMEM:
-      msg = "Out-of-memory";
-      break;
-    }
-    throw Exception("pthread_key_create returned %d: %s", ret, msg);
-  }
+  ThreadLocalCheckReturn(ret, "pthread_key_create");
+}
+
+inline void ThreadLocalSetValue(pthread_key_t key, const void* value) {
+  int ret = pthread_setspecific(key, value);
+  ThreadLocalCheckReturn(ret, "pthread_setspecific");
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -108,7 +113,7 @@ struct ThreadLocalManager {
     return pthread_getspecific(m_key);
   }
   void setTop(void * p) {
-    pthread_setspecific(m_key, p);
+    ThreadLocalSetValue(m_key, p);
   }
   static void OnThreadExit(void *p);
   pthread_key_t m_key;
@@ -230,11 +235,12 @@ void ThreadLocalSingletonOnThreadExit(void *obj) {
 template <typename T>
 class ThreadLocalSingleton {
 public:
-  ThreadLocalSingleton() {}
+  ThreadLocalSingleton() { s_inited = true; }
 
   static T *getCheck() ATTRIBUTE_COLD NEVER_INLINE;
 
   static T* getNoCheck() {
+    assert(s_inited);
     assert(s_singleton == (T*)&s_storage);
     return (T*)&s_storage;
   }
@@ -263,10 +269,15 @@ private:
   typedef typename boost::aligned_storage<sizeof(T), sizeof(void*)>::type
           StorageType;
   static __thread StorageType s_storage;
+  static bool s_inited; // no-fast-TLS requires construction so be consistent
 };
 
 template<typename T>
+bool ThreadLocalSingleton<T>::s_inited = false;
+
+template<typename T>
 T *ThreadLocalSingleton<T>::getCheck() {
+  assert(s_inited);
   if (!s_singleton) {
     T* p = (T*) &s_storage;
     T::Create(p);
@@ -375,7 +386,7 @@ public:
     T *obj = (T*)pthread_getspecific(m_key);
     if (obj == nullptr) {
       obj = new T();
-      pthread_setspecific(m_key, obj);
+      ThreadLocalSetValue(m_key, obj);
     }
     return obj;
   }
@@ -384,11 +395,11 @@ public:
 
   void destroy() {
     delete (T*)pthread_getspecific(m_key);
-    pthread_setspecific(m_key, nullptr);
+    ThreadLocalSetValue(m_key, nullptr);
   }
 
   void nullOut() {
-    pthread_setspecific(m_key, nullptr);
+    ThreadLocalSetValue(m_key, nullptr);
   }
 
   /**
@@ -428,7 +439,7 @@ public:
 
   void destroy() {
     delete (T*)pthread_getspecific(m_key);
-    pthread_setspecific(m_key, nullptr);
+    ThreadLocalSetValue(m_key, nullptr);
   }
 
   /**
@@ -451,7 +462,7 @@ T *ThreadLocalNoCheck<T>::getCheck() const {
   T *obj = (T*)pthread_getspecific(m_key);
   if (obj == nullptr) {
     obj = new T();
-    pthread_setspecific(m_key, obj);
+    ThreadLocalSetValue(m_key, obj);
   }
   return obj;
 }
@@ -473,6 +484,7 @@ public:
 
   static T *getCheck() ATTRIBUTE_COLD NEVER_INLINE;
   static T* getNoCheck() {
+    assert(s_inited);
     T *obj = (T*)pthread_getspecific(s_key);
     assert(obj);
     return obj;
@@ -484,7 +496,7 @@ public:
     void* p = pthread_getspecific(s_key);
     T::Delete((T*)p);
     free(p);
-    pthread_setspecific(s_key, nullptr);
+    ThreadLocalSetValue(s_key, nullptr);
   }
 
   T *operator->() const {
@@ -497,9 +509,11 @@ public:
 
 private:
   static pthread_key_t s_key;
+  static bool s_inited; // pthread_key_t has no portable valid sentinel
 
   static pthread_key_t getKey() {
-    if (s_key == 0) {
+    if (!s_inited) {
+      s_inited = true;
       ThreadLocalCreateKey(&s_key, ThreadLocalSingletonOnThreadExit<T>);
     }
     return s_key;
@@ -508,17 +522,20 @@ private:
 
 template<typename T>
 T *ThreadLocalSingleton<T>::getCheck() {
+  assert(s_inited);
   T *obj = (T*)pthread_getspecific(s_key);
   if (obj == nullptr) {
     obj = (T*)malloc(sizeof(T));
     T::Create(obj);
-    pthread_setspecific(s_key, obj);
+    ThreadLocalSetValue(s_key, obj);
   }
   return obj;
 }
 
 template<typename T>
 pthread_key_t ThreadLocalSingleton<T>::s_key;
+template<typename T>
+bool ThreadLocalSingleton<T>::s_inited = false;
 
 ///////////////////////////////////////////////////////////////////////////////
 // some classes don't need new/delete at all
@@ -542,13 +559,13 @@ public:
   }
 
   void set(T* obj) {
-    pthread_setspecific(m_key, obj);
+    ThreadLocalSetValue(m_key, obj);
   }
 
   bool isNull() const { return pthread_getspecific(m_key) == nullptr; }
 
   void destroy() {
-    pthread_setspecific(m_key, nullptr);
+    ThreadLocalSetValue(m_key, nullptr);
   }
 
   /**

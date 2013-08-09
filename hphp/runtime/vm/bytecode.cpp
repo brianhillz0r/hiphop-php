@@ -531,7 +531,8 @@ class StackElms {
       size_t algnSz = RuntimeOption::EvalVMStackElms * sizeof(TypedValue);
       if (posix_memalign((void**)&m_elms, algnSz, algnSz) != 0) {
         throw std::runtime_error(
-          std::string("VM stack initialization failed: ") + strerror(errno));
+          std::string("VM stack initialization failed: ") +
+                      folly::errnoStr(errno).c_str());
       }
     }
     return m_elms;
@@ -5902,15 +5903,19 @@ free_frame:
   memcpy(m_stack.allocTV(), &ret, sizeof(TypedValue));
 }
 
-bool VMExecutionContext::prepareArrayArgs(ActRec* ar,
-                                          ArrayData* args) {
+bool VMExecutionContext::prepareArrayArgs(ActRec* ar, Array& arrayArgs) {
   if (UNLIKELY(ar->hasInvName())) {
     m_stack.pushStringNoRc(ar->getInvName());
-    m_stack.pushArray(args);
+    if (UNLIKELY(!arrayArgs.get()->isVectorData())) {
+      arrayArgs = arrayArgs.values();
+    }
+    m_stack.pushArray(arrayArgs.get());
     ar->setVarEnv(0);
     ar->initNumArgs(2);
     return true;
   }
+
+  ArrayData* args = arrayArgs.get();
 
   int nargs = args->size();
   const Func* f = ar->m_func;
@@ -6016,7 +6021,7 @@ bool VMExecutionContext::doFCallArray(PC& pc) {
       - (uintptr_t)m_fp->m_func->base();
     assert(pcOff() > m_fp->m_func->base());
 
-    if (UNLIKELY(!prepareArrayArgs(ar, args.values().get()))) return false;
+    if (UNLIKELY(!prepareArrayArgs(ar, args))) return false;
   }
 
   if (UNLIKELY(!(prepareFuncEntry(ar, pc)))) {

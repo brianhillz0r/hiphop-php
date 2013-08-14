@@ -188,6 +188,7 @@ O(AssertType,                   DParam, S(Gen,Nullptr,Cls),    C|E|CRc|PRc|P) \
 O(CheckTypeMem,                     ND, S(PtrToGen),                       E) \
 O(GuardLoc,                         ND, S(FramePtr),                       E) \
 O(GuardCls,                         ND, S(Obj),                            E) \
+O(GuardArrayKind,                   ND, S(Arr),                            E) \
 O(GuardStk,                  D(StkPtr), S(StkPtr),                         E) \
 O(CheckLoc,                         ND, S(FramePtr),                       E) \
 O(CheckStk,                  D(StkPtr), S(StkPtr),                         E) \
@@ -215,6 +216,8 @@ O(Mul,                          DArith, S(Int,Dbl) S(Int,Dbl),             C) \
 O(DivDbl,                       D(Dbl), S(Dbl) S(Dbl),                     C) \
 O(Mod,                          D(Int), S(Int) S(Int),                     C) \
 O(Sqrt,                         D(Dbl), S(Dbl),                            C) \
+O(AbsInt,                       D(Int), S(Int),                            C) \
+O(AbsDbl,                       D(Dbl), S(Dbl),                            C) \
 O(BitAnd,                       D(Int), S(Int) S(Int),                     C) \
 O(BitOr,                        D(Int), S(Int) S(Int),                     C) \
 O(BitXor,                       D(Int), S(Int) S(Int),                     C) \
@@ -247,7 +250,7 @@ O(ConvCellToDbl,                D(Dbl), S(Cell),                      N|Er|K) \
                                                                               \
 O(ConvArrToInt,                 D(Int), S(Arr),                          C|N) \
 O(ConvBoolToInt,                D(Int), S(Bool),                           C) \
-O(ConvDblToInt,                 D(Int), S(Dbl),                          C|N) \
+O(ConvDblToInt,                 D(Int), S(Dbl),                            C) \
 O(ConvObjToInt,                 D(Int), S(Obj),                       N|Er|K) \
 O(ConvStrToInt,                 D(Int), S(Str),                            N) \
 O(ConvCellToInt,                D(Int), S(Cell),                      N|Er|K) \
@@ -350,6 +353,8 @@ O(LdClsCns,                     DParam, NA,                               NF) \
 O(LookupClsCns,                 DParam, NA,                  E|Refs|Er|N|Mem) \
 O(LdCns,                        DParam, CStr,                             NF) \
 O(LookupCns,                    DParam, CStr,                E|Refs|Er|N|Mem) \
+O(LookupCnsE,                   DParam, CStr,                E|Refs|Er|N|Mem) \
+O(LookupCnsU,                   DParam, CStr CStr,           E|Refs|Er|N|Mem) \
 O(LdClsMethodCache,         D(FuncCls), C(Str)                                \
                                           C(Str)                              \
                                           C(NamedEntity)                      \

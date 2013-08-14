@@ -27,7 +27,7 @@
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/sweepable.h"
-#include "hphp/runtime/server/server_stats.h"
+#include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/comparisons.h"
@@ -903,32 +903,6 @@ void PersistentObjectStore::remove(const char *type, const char *name) {
 const ResourceMap &PersistentObjectStore::getMap(const char *type) {
   assert(type && *type);
   return m_objects[type];
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// silencer
-
-
-Silencer::Silencer(bool e) : m_active(false) {
-  if (e) enable();
-}
-
-void Silencer::enable() {
-  m_errorReportingValue = g_context->getErrorReportingLevel();
-  g_context->setErrorReportingLevel(0);
-  m_active = true;
-}
-
-void Silencer::disableHelper() {
-  if (m_active) {
-    if (g_context->getErrorReportingLevel() == 0)
-      g_context->setErrorReportingLevel(m_errorReportingValue);
-  }
-}
-
-Variant Silencer::disable(CVarRef v) {
-  disable();
-  return v;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

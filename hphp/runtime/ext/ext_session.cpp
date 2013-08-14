@@ -1234,7 +1234,7 @@ new_session:
 
   /* Unconditionally destroy existing arrays -- possible dirty data */
   GlobalVariables *g = get_global_variables();
-  g->getRef(s__SESSION) = Array::Create();
+  g->add(s__SESSION, Array::Create(), false);
 
   PS(invalid_session_id) = false;
   String value;
@@ -1286,8 +1286,8 @@ static void php_session_send_cookie() {
     gettimeofday(&tv, NULL);
     expire = tv.tv_sec + PS(cookie_lifetime);
   }
-  transport->setCookie(PS(session_name), PS(id), expire, PS(cookie_path), 
-                       PS(cookie_domain), PS(cookie_secure), 
+  transport->setCookie(PS(session_name), PS(id), expire, PS(cookie_path),
+                       PS(cookie_domain), PS(cookie_secure),
                        PS(cookie_httponly), true);
 }
 

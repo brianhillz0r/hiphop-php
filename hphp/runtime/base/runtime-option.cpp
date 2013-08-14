@@ -27,7 +27,7 @@
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/shared-store-base.h"
-#include "hphp/runtime/server/access_log.h"
+#include "hphp/runtime/server/access-log.h"
 #include "hphp/runtime/base/extended-logger.h"
 #include "hphp/runtime/base/simple-counter.h"
 #include "hphp/util/util.h"
@@ -39,7 +39,7 @@
 #include "hphp/runtime/base/hardware-counter.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/util/parser/scanner.h"
-#include "hphp/runtime/server/access_log.h"
+#include "hphp/runtime/server/access-log.h"
 #include "hphp/runtime/base/crash-reporter.h"
 #include "folly/String.h"
 
@@ -374,6 +374,9 @@ static inline std::string regionSelectorDefault() {
 #endif
 }
 
+static inline bool hugePagesSoundNice() {
+  return RuntimeOption::ServerExecutionMode();
+}
 
 const uint64_t kEvalVMStackElmsDefault =
 #ifdef VALGRIND
@@ -442,6 +445,7 @@ bool RuntimeOption::EnablePregErrorLog = true;
 int RuntimeOption::HHProfServerPort = 4327;
 int RuntimeOption::HHProfServerThreads = 2;
 int RuntimeOption::HHProfServerTimeoutSeconds = 30;
+bool RuntimeOption::HHProfServerProfileClientMode = true;
 int RuntimeOption::HHProfServerFilterMinAllocPerReq = 2;
 int RuntimeOption::HHProfServerFilterMinBytesPerReq = 128;
 
@@ -1117,6 +1121,10 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
 #undef get_uint32
 #undef get_uint32_t
 #undef get_uint64
+    if (EvalMapLowMemHuge) {
+      assert(hugePagesSoundNice());
+      Util::low_malloc_setopts(Util::low_malloc_opts::huge);
+    }
 
     EvalJitEnableRenameFunction = EvalJitEnableRenameFunction || !EvalJit;
 
@@ -1242,6 +1250,8 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     HHProfServerThreads = hhprofServer["Threads"].getInt16(2);
     HHProfServerTimeoutSeconds =
       hhprofServer["TimeoutSeconds"].getInt64(30);
+    HHProfServerProfileClientMode =
+      hhprofServer["ProfileClientMode"].getBool();
 
     // HHProfServer.Filter.*
     Hdf hhprofFilter = hhprofServer["Filter"];

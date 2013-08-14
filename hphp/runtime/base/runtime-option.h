@@ -18,9 +18,9 @@
 #define incl_HPHP_RUNTIME_OPTION_H_
 
 #include <boost/container/flat_set.hpp>
-#include "hphp/runtime/server/files_match.h"
-#include "hphp/runtime/server/satellite_server.h"
-#include "hphp/runtime/server/virtual_host.h"
+#include "hphp/runtime/server/files-match.h"
+#include "hphp/runtime/server/satellite-server.h"
+#include "hphp/runtime/server/virtual-host.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -419,7 +419,9 @@ public:
   F(bool, DumpTC,                      false)                           \
   F(bool, DumpTCAnchors,               false)                           \
   F(bool, DumpAst,                     false)                           \
-  F(bool, MapTCHuge,                   true)                            \
+  F(bool, MapTCHuge,                   hugePagesSoundNice())            \
+  F(bool, MapTgtCacheHuge,             false)                           \
+  F(bool, MapLowMemHuge,               hugePagesSoundNice())            \
   F(uint32_t, TCNumHugeHotMB,          16)                              \
   F(uint32_t, TCNumHugeColdMB,         4)                               \
   F(bool, RandomHotFuncs,              false)                           \
@@ -494,6 +496,7 @@ public:
   static int HHProfServerPort;
   static int HHProfServerThreads;
   static int HHProfServerTimeoutSeconds;
+  static bool HHProfServerProfileClientMode;
   static int HHProfServerFilterMinAllocPerReq;
   static int HHProfServerFilterMinBytesPerReq;
 

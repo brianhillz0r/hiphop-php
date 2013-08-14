@@ -468,6 +468,16 @@ IRTranslator::translateCns(const NormalizedInstruction& i) {
 }
 
 void
+IRTranslator::translateCnsE(const NormalizedInstruction& i) {
+  HHIR_EMIT(CnsE, i.imm[0].u_SA);
+}
+
+void
+IRTranslator::translateCnsU(const NormalizedInstruction& i) {
+  HHIR_EMIT(CnsU, i.imm[0].u_SA, i.imm[1].u_SA);
+}
+
+void
 IRTranslator::translateDefCns(const NormalizedInstruction& i) {
   HHIR_EMIT(DefCns, (i.imm[0].u_SA));
 }
@@ -497,6 +507,11 @@ IRTranslator::translateAdd(const NormalizedInstruction& i) {
 void
 IRTranslator::translateSqrt(const NormalizedInstruction& i) {
   HHIR_EMIT(Sqrt);
+}
+
+void
+IRTranslator::translateAbs(const NormalizedInstruction& i) {
+  HHIR_EMIT(Abs);
 }
 
 void
@@ -592,13 +607,6 @@ void
 IRTranslator::translateNativeImpl(const NormalizedInstruction& ni) {
   HHIR_EMIT(NativeImpl);
 }
-
-// emitClsLocalIndex --
-// emitStringToClass --
-// emitStringToKnownClass --
-// emitObjToClass --
-// emitClsAndPals --
-//   Helpers for AGetC/AGetL.
 
 const int kEmitClsLocalIdx = 0;
 

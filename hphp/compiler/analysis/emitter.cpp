@@ -3240,6 +3240,13 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           e.False();
           e.ArrayIdx();
           return true;
+        } else if (call->isCallToFunction("abs")) {
+          if (params && params->getCount() == 1) {
+            visit((*params)[0]);
+            emitConvertToCell(e);
+            e.Abs();
+            return true;
+          }
         } else if (call->isCompilerCallToFunction("hphp_continuation_done")) {
           assert(params && params->getCount() == 1);
           visit((*params)[0]);
@@ -3975,6 +3982,14 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         visit(expr);
         emitConvertToCell(e);
 
+        int64_t normalLabel = 2 * await->getLabel();
+        int64_t exceptLabel = normalLabel - 1;
+
+        // if expr is null, just continue
+        e.Dup();
+        e.IsNullC();
+        e.JmpNZ(m_yieldLabels[normalLabel]);
+
         // if the type of expr is not WaitHandle (can be just Awaitable),
         // call getWaitHandle() method.
         AnalysisResultConstPtr ar = expr->getScope()->getContainingProgram();
@@ -3989,9 +4004,6 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           e.FCall(0);
           emitConvertToCell(e);
         }
-
-        int64_t normalLabel = 2 * await->getLabel();
-        int64_t exceptLabel = normalLabel - 1;
 
         e.ContSuspend(normalLabel);
 
@@ -6550,6 +6562,9 @@ PreClass::Hoistable EmitterVisitor::emitClass(Emitter& e, ClassScopePtr cNode,
           if (vNode->isArray()) {
             throw IncludeTimeFatalException(
               cc, "Arrays are not allowed in class constants");
+          } else if (vNode->isCollection()) {
+            throw IncludeTimeFatalException(
+              cc, "Collections are not allowed in class constants");
           } else if (vNode->isScalar()) {
             initScalar(tvVal, vNode);
           } else {

@@ -27,7 +27,6 @@
 #include <queue>
 #include <unwind.h>
 #include <unordered_set>
-#include <signal.h>
 #ifdef __FreeBSD__
 #include <sys/ucontext.h>
 #endif
@@ -76,7 +75,7 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/server/source_root_info.h"
+#include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/ext_continuation.h"
@@ -205,40 +204,6 @@ struct IfCountNotStatic {
     delete m_cb;
   }
 };
-
-// Segfault handler: figure out if it's an intentional segfault
-// (timeout exception) and if so, act appropriately. Otherwise, pass
-// the signal on.
-void TranslatorX64::SEGVHandler(int signum, siginfo_t *info, void *ctx) {
-  TranslatorX64 *self = Get();
-  void *surprisePage =
-    ThreadInfo::s_threadInfo->m_reqInjectionData.surprisePage;
-  if (info->si_addr == surprisePage) {
-    ucontext_t *ucontext = (ucontext_t*)ctx;
-    TCA rip = (TCA)RIP_REGISTER(ucontext->uc_mcontext);
-    SignalStubMap::const_accessor a;
-    if (!self->m_segvStubs.find(a, rip)) {
-      NOT_REACHED();
-    }
-    TCA astubsCall = a->second;
-
-    // When this handler returns, "call" the astubs code for this
-    // surprise check.
-    RIP_REGISTER(ucontext->uc_mcontext) = (uintptr_t)astubsCall;
-
-    // We've processed this event; reset the page in case execution
-    // continues normally.
-    g_vmContext->m_stack.unprotect();
-  } else {
-    sig_t handler = (sig_t)self->m_segvChain;
-    if (handler == SIG_DFL || handler == SIG_IGN) {
-      signal(signum, handler);
-      raise(signum);
-    } else {
-      self->m_segvChain(signum, info, ctx);
-    }
-  }
-}
 
 // Logical register move: ensures the value in src will be in dest
 // after execution, but might do so in strange ways. Do not count on
@@ -2826,29 +2791,6 @@ TranslatorX64::emitTransCounterInc(X64Assembler& a) {
   return start;
 }
 
-void
-TranslatorX64::getInputsIntoXMMRegs(const NormalizedInstruction& ni,
-                                    PhysReg lr, PhysReg rr,
-                                    RegXMM lxmm,
-                                    RegXMM rxmm) {
-  const DynLocation& l = *ni.inputs[0];
-  const DynLocation& r = *ni.inputs[1];
-  // Get the values into their appropriate xmm locations
-  auto intoXmm = [&](const DynLocation& l, PhysReg src, RegXMM xmm) {
-    if (l.isInt()) {
-      // cvtsi2sd doesn't modify the high bits of its target, which can
-      // cause false dependencies to prevent register renaming from kicking
-      // in. Break the dependency chain by zeroing out the destination reg.
-      a.  pxor_xmm_xmm(xmm, xmm);
-      a.  cvtsi2sd_reg64_xmm(src, xmm);
-    } else {
-      a.  mov_reg64_xmm(src, xmm);
-    }
-  };
-  intoXmm(l, lr, lxmm);
-  intoXmm(r, rr, rxmm);
-}
-
 #define O(opcode, imm, pusph, pop, flags) \
 /**
  * The interpOne methods saves m_pc, m_fp, and m_sp ExecutionContext,
@@ -3040,7 +2982,7 @@ TCA
 TranslatorX64::emitNativeTrampoline(TCA helperAddr) {
   auto& a = atrampolines;
 
-  if (!a.canEmit(m_trampolineSize)) {
+  if (!a.canEmit(kExpectedPerTrampolineSize)) {
     // not enough space to emit a trampoline, so just return the
     // helper address and emitCall will the emit the right sequence
     // to call it indirectly
@@ -3057,7 +2999,7 @@ TranslatorX64::emitNativeTrampoline(TCA helperAddr) {
     if (strlen(name) > limit) {
       name[limit] = '\0';
     }
-    Stats::helperNames[index] = name;
+    Stats::helperNames[index].store(name, std::memory_order_release);
   }
 
   /*
@@ -3075,10 +3017,6 @@ TranslatorX64::emitNativeTrampoline(TCA helperAddr) {
   a.    ud2    ();
 
   trampolineMap[helperAddr] = trampAddr;
-  if (m_trampolineSize == 0) {
-    m_trampolineSize = a.frontier() - trampAddr;
-    assert(m_trampolineSize >= kMinPerTrampolineSize);
-  }
   recordBCInstr(OpNativeTrampoline, a, trampAddr);
   return trampAddr;
 }
@@ -3667,12 +3605,20 @@ asm_label(a, loopHead);
 }
 
 TranslatorX64::TranslatorX64()
-: m_numNativeTrampolines(0),
-  m_trampolineSize(0),
-  m_defClsHelper(0),
-  m_funcPrologueRedispatch(0),
-  m_numHHIRTrans(0),
-  m_catchTraceMap(128)
+  : m_numNativeTrampolines(0)
+  , m_callToExit(nullptr)
+  , m_retHelper(nullptr)
+  , m_retInlHelper(nullptr)
+  , m_genRetHelper(nullptr)
+  , m_stackOverflowHelper(nullptr)
+  , m_irPopRHelper(nullptr)
+  , m_dtorGenericStub(nullptr)
+  , m_dtorGenericStubRegs(nullptr)
+  , m_dtorStubs{}
+  , m_defClsHelper(nullptr)
+  , m_funcPrologueRedispatch(nullptr)
+  , m_numHHIRTrans(0)
+  , m_catchTraceMap(128)
 {
   static const size_t kRoundUp = 2 << 20;
   const size_t kAHotSize   = RuntimeOption::VMTranslAHotSize;
@@ -3741,23 +3687,28 @@ TranslatorX64::TranslatorX64()
   base += -(uint64_t)base & (kRoundUp - 1);
   enhugen(base, RuntimeOption::EvalTCNumHugeHotMB);
   TRACE(1, "init atrampolines @%p\n", base);
-  atrampolines.init(base, kTrampolinesBlockSize);
+  trampolinesCode.init(base, kTrampolinesBlockSize);
+  atrampolines.init(&trampolinesCode);
   base += kTrampolinesBlockSize;
 
   m_unwindRegistrar = register_unwind_region(base, m_totalSize);
   TRACE(1, "init ahot @%p\n", base);
-  ahot.init(base, kAHotSize);
+  hotCode.init(base, kAHotSize);
+  ahot.init(&hotCode);
   base += kAHotSize;
   TRACE(1, "init a @%p\n", base);
-  a.init(base, kASize);
+  mainCode.init(base, kASize);
+  a.init(&mainCode);
   aStart = base;
   base += kASize;
   TRACE(1, "init aprof @%p\n", base);
-  aprof.init(base, kAProfSize);
+  profCode.init(base, kAProfSize);
+  aprof.init(&profCode);
   base += kAProfSize;
   base += -(uint64_t)base & (kRoundUp - 1);
   TRACE(1, "init astubs @%p\n", base);
-  astubs.init(base, kAStubsSize);
+  stubsCode.init(base, kAStubsSize);
+  astubs.init(&stubsCode);
   enhugen(base, RuntimeOption::EvalTCNumHugeColdMB);
   base += kAStubsSize;
   TRACE(1, "init gdata @%p\n", base);
@@ -3849,22 +3800,6 @@ TranslatorX64::TranslatorX64()
   m_funcPrologueRedispatch = emitPrologueRedispatch(a);
   TRACE(1, "HOTSTUB: all stubs finished: %lx\n",
         uintptr_t(a.frontier()));
-
-  if (trustSigSegv) {
-    // Install SIGSEGV handler for timeout exceptions
-    struct sigaction sa;
-    struct sigaction old_sa;
-    sa.sa_sigaction = &TranslatorX64::SEGVHandler;
-    sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    if (sigaction(SIGSEGV, &sa, &old_sa) != 0) {
-      throw std::runtime_error(
-        std::string("Failed to install SIGSEGV handler: ") +
-          folly::errnoStr(errno).c_str());
-    }
-    m_segvChain = old_sa.sa_flags & SA_SIGINFO ?
-      old_sa.sa_sigaction : (sigaction_t)old_sa.sa_handler;
-  }
 
   moveToAlign(astubs);
   m_stackOverflowHelper = astubs.frontier();
@@ -4055,7 +3990,10 @@ TranslatorX64::getPerfCounters(Array& ret) {
 }
 
 TranslatorX64::~TranslatorX64() {
-  freeSlab(atrampolines.base(), m_totalSize);
+  int result = munmap(trampolinesCode.getBase(), m_totalSize);
+  if (result != 0) {
+    perror("freeSlab: munmap");
+  }
 }
 
 static Debug::TCRange rangeFrom(const X64Assembler& a, const TCA addr,
@@ -4123,7 +4061,7 @@ std::string TranslatorX64::getUsage() {
   size_t aProfUsage = aprof.used();
   size_t aUsage     = a.used();
   size_t stubsUsage = astubs.used();
-  size_t dataUsage  = m_globalData.frontier - m_globalData.base;
+  size_t dataUsage  = m_globalData.getFrontier() - m_globalData.getBase();
   size_t tcUsage    = TargetCache::s_frontier;
   size_t persistentUsage =
     TargetCache::s_persistent_frontier - TargetCache::s_persistent_start;
@@ -4140,7 +4078,7 @@ std::string TranslatorX64::getUsage() {
     aUsage,     100 * aUsage / a.capacity(),
     aProfUsage, aprof.capacity() != 0 ? 100 * aProfUsage / aprof.capacity() : 0,
     stubsUsage, 100 * stubsUsage / astubs.capacity(),
-    dataUsage,  100 * dataUsage / m_globalData.size,
+    dataUsage,  100 * dataUsage / m_globalData.getSize(),
     tcUsage,
     400 * tcUsage / RuntimeOption::EvalJitTargetCacheSize / 3,
     persistentUsage,

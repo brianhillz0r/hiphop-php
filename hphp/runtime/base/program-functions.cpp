@@ -24,15 +24,15 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/pprof-server.h"
 #include "hphp/util/shared_memory_allocator.h"
-#include "hphp/runtime/server/pagelet_server.h"
-#include "hphp/runtime/server/xbox_server.h"
-#include "hphp/runtime/server/http_server.h"
-#include "hphp/runtime/server/replay_transport.h"
-#include "hphp/runtime/server/http_request_handler.h"
-#include "hphp/runtime/server/admin_request_handler.h"
-#include "hphp/runtime/server/server_stats.h"
-#include "hphp/runtime/server/server_name_indication.h"
-#include "hphp/runtime/server/server_note.h"
+#include "hphp/runtime/server/pagelet-server.h"
+#include "hphp/runtime/server/xbox-server.h"
+#include "hphp/runtime/server/http-server.h"
+#include "hphp/runtime/server/replay-transport.h"
+#include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/runtime/server/admin-request-handler.h"
+#include "hphp/runtime/server/server-stats.h"
+#include "hphp/runtime/server/server-name-indication.h"
+#include "hphp/runtime/server/server-note.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/util/process.h"
 #include "hphp/util/capability.h"
@@ -1324,13 +1324,14 @@ void hphp_process_init() {
   action.sa_flags = SA_SIGINFO | SA_NODEFER;
   sigaction(SIGVTALRM, &action, nullptr);
 
+  init_thread_locals();
+
   // Initialize per-process dynamic PHP-visible consts before ClassInfo::Load()
   k_PHP_BINARY = StringData::GetStaticString(current_executable_path());
   k_PHP_BINDIR = StringData::GetStaticString(current_executable_directory());
   k_PHP_OS = StringData::GetStaticString(f_php_uname("s"));
   k_PHP_SAPI = StringData::GetStaticString(RuntimeOption::ExecutionMode);
 
-  init_thread_locals();
   ClassInfo::Load();
   Process::InitProcessStatics();
 

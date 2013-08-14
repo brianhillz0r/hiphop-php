@@ -362,6 +362,10 @@ GuardCls<T<Cls>> S0:Obj
 
   Guard that the object S0 has class Cls; else make a fallback jump.
 
+GuardArrayKind<T<AK>> S0:Obj
+
+  Guard that the array S0 has kind AK; else make a fallback jump.
+
 CheckLoc<T,localId> S0:FramePtr -> L
 
   Check that type of the given localId on the frame S0 is T; if not,
@@ -471,6 +475,8 @@ D:CountedStr = AssertNonNull S0:{Nullptr|CountedStr}
 2. Arithmetic
 
 
+D:Int            = AbsInt S0:Int
+D:Dbl            = AbsDbl S0:Dbl
 D:{Int|Dbl}      = OpAdd    S0:{Int|Dbl} S1:{Int|Dbl}
 D:{Int|Dbl}      = OpSub    S0:{Int|Dbl} S1:{Int|Dbl}
 D:{Int|Dbl}      = OpMul    S0:{Int|Dbl} S1:{Int|Dbl}
@@ -490,6 +496,9 @@ D:Dbl            = OpCeil   S0:Dbl
 
   Undefined behavior occurs if OpMod is given a divisor of zero, or if
   the divisor is -1 and the dividend is the minimum representable integer.
+
+  AbsInt and AbsDbl compute the absolute value of an integer or double
+  respectively.
 
   OpDivDbl Will branch to L when S1 is zero (signed or unsigned).  When the
   result of the division is a real valued number OpDivDbl conforms to IEEE 754.
@@ -845,6 +854,19 @@ D:T = LdClsCns<T,className,constName> [ -> L ]
   The result may be uninitialized if the class is not defined.  Note
   that no decref of the result is necessary because class constants
   will always be static.
+
+D:T = LookupCns<T,constName>
+D:T = LookupCnsE<T,constName>
+
+  Load a constant via the target cache. Raises an undefined constant
+  notice if the constant cannot be defined. The E variant will instead
+  throw a fatal error if it cannot define the constant.
+
+D:T = LookupCnsU<T,constName,fallbackName>
+
+  Load an unqualified constant via the target cache, first by trying
+  constName, then by trying fallbackName. Raises a notice if neither
+  can be found.
 
 D:T = LookupClsCns<T,className,constName>
 
@@ -2039,8 +2061,7 @@ DeleteUnwinderException
 
   Deletes the current unwinder exception.
 
-TypeProfileFunc<paramIndex, functionName> S0:Gen 
-  
+TypeProfileFunc<paramIndex, functionName> S0:Gen
+
   Profiles that function's parameter/return value for a particular parameter index.
   Calls into native c++ function.
-

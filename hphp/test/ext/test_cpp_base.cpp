@@ -25,7 +25,7 @@
 #include "hphp/runtime/ext/ext_curl.h"
 #include "hphp/runtime/base/shared-store-base.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/server/ip_block_map.h"
+#include "hphp/runtime/server/ip-block-map.h"
 #include "hphp/test/ext/test_mysql_info.h"
 #include "hphp/system/systemlib.h"
 
@@ -266,8 +266,8 @@ bool TestCppBase::TestArray() {
   {
     Variant arr = CREATE_MAP2("n1", "v1", "n2", "v2");
     arr.escalate();
-    for (ArrayIterPtr iter = arr.begin(arr, true); !iter->end(); iter->next()){
-      unset(arr.lvalAt(iter->first()));
+    for (ArrayIter iter = arr.begin(arr, true); !iter->end(); iter->next()){
+      arr.lvalAt(iter->first()).reset();
     }
     VS(arr, Array::Create());
   }

@@ -16,7 +16,6 @@
 #ifndef incl_HPHP_RUNTIME_VM_TRANSLATOR_X64_H_
 #define incl_HPHP_RUNTIME_VM_TRANSLATOR_X64_H_
 
-#include <signal.h>
 #include <memory>
 #include <boost/noncopyable.hpp>
 
@@ -156,9 +155,6 @@ class TranslatorX64 : public Translator
   friend class Tx64Reaper;
   friend class HPHP::JIT::CodeGenerator;
 
-  typedef tbb::concurrent_hash_map<TCA, TCA> SignalStubMap;
-  typedef void (*sigaction_t)(int, siginfo_t*, void*);
-
   typedef X64Assembler Asm;
 
   enum class AsmSelection {
@@ -194,17 +190,19 @@ class TranslatorX64 : public Translator
 
   TCA                    tcStart;
   TCA                    aStart;
-  Asm                    ahot;    // used for hot code of AttrHot functions
-  Asm                    a;       // used for hot code of non-AttrHot functions
-  Asm                    aprof;   // used for hot code of profiling translations
-  Asm                    astubs;  // used for cold code
-  Asm                    atrampolines;
+  CodeBlock              hotCode;
+  CodeBlock              mainCode;
+  CodeBlock              profCode;
+  CodeBlock              stubsCode;
+  CodeBlock              trampolinesCode;
+  X64Assembler           ahot;    // used for hot code of AttrHot functions
+  X64Assembler           a;       // used for hot code of non-AttrHot functions
+  X64Assembler           aprof;   // used for hot code of profiling translations
+  X64Assembler           astubs;  // used for cold code
+  X64Assembler           atrampolines;
   PointerMap             trampolineMap;
   int                    m_numNativeTrampolines;
-  size_t                 m_trampolineSize; // size of each trampoline
 
-  SignalStubMap          m_segvStubs;
-  sigaction_t            m_segvChain;
   TCA                    m_callToExit;
   TCA                    m_retHelper;
   TCA                    m_retInlHelper;
@@ -250,7 +248,6 @@ private:
   vector<PendingFixup> m_pendingFixups;
 
   void drawCFG(std::ofstream& out) const;
-  static vector<PhysReg> x64TranslRegs();
 
   Asm& getAsmFor(TCA addr) {
     assert(a.base()    != ahot.base()   &&
@@ -262,9 +259,6 @@ private:
   void emitIncRef(PhysReg base, DataType);
   void emitIncRefGenericRegSafe(PhysReg base, int disp, PhysReg tmp);
   static CppCall getDtorCall(DataType type);
-  void emitCopy(PhysReg srcCell, int disp, PhysReg destCell);
-
-  void emitThisCheck(const NormalizedInstruction& i, PhysReg reg);
 
 public:
   void emitCall(Asm& a, TCA dest);
@@ -274,43 +268,21 @@ public:
 private:
   TCA emitCallArrayPrologue(const Func* func,
                             const DVFuncletsVec& dvs);
-  void translateClassExistsImpl(const Tracelet& t,
-                                const NormalizedInstruction& i,
-                                Attr typeAttr);
   void recordSyncPoint(Asm& a, Offset pcOff, Offset spOff);
   void emitEagerSyncPoint(Asm& a, const Opcode* pc, const Offset spDiff);
   void recordIndirectFixup(CTCA addr, int dwordsPushed);
-  void emitStringToClass(const NormalizedInstruction& i);
-  void emitStringToKnownClass(const NormalizedInstruction& i,
-                              const StringData* clssName);
-  void emitObjToClass(const NormalizedInstruction& i);
-  void emitClsAndPals(const NormalizedInstruction& i);
 
   template<int Arity> TCA emitNAryStub(Asm& a, CppCall c);
   TCA emitUnaryStub(Asm& a, CppCall c);
-  TCA genericRefCountStub(Asm& a);
-  TCA genericRefCountStubRegs(Asm& a);
   void emitFreeLocalsHelpers();
   void emitGenericDecRefHelpers();
   TCA emitPrologueRedispatch(Asm &a);
   TCA emitFuncGuard(Asm& a, const Func *f);
-  template <bool reentrant>
-  void emitDerefStoreToLoc(PhysReg srcReg, const Location& destLoc);
 
-  void getInputsIntoXMMRegs(const NormalizedInstruction& ni,
-                            PhysReg lr, PhysReg rr,
-                            RegXMM lxmm, RegXMM rxmm);
-  void fpEq(const NormalizedInstruction& i, PhysReg lr, PhysReg rr);
   void emitRB(Asm& a, Trace::RingBufferType t, SrcKey sk,
               RegSet toSave = RegSet());
   void emitRB(Asm& a, Trace::RingBufferType t, const char* msgm,
               RegSet toSave = RegSet());
-  void newTuple(const NormalizedInstruction& i, unsigned n);
-
-  enum {
-    ArgDontAllocate = -1,
-    ArgAnyReg = -2
-  };
 
  private:
   template<typename L>
@@ -320,14 +292,6 @@ private:
   static uint64_t toStringHelper(ObjectData *obj);
   void invalidateSrcKey(SrcKey sk);
  public:
-  template<typename T>
-  void invalidateSrcKeys(const T& keys) {
-    BlockingLeaseHolder writer(s_writeLease);
-    assert(writer);
-    for (typename T::const_iterator i = keys.begin(); i != keys.end(); ++i) {
-      invalidateSrcKey(*i);
-    }
-  }
 
   void registerCatchTrace(CTCA ip, TCA trace);
   TCA getCatchTrace(CTCA ip) const;
@@ -411,8 +375,6 @@ public:
 
   void checkRefs(Asm&, SrcKey, const RefDeps&, SrcRec&);
 
-  void emitInlineReturn(Location retvalSrcLoc, int retvalSrcDisp);
-  void emitGenericReturn(bool noThis, int retvalSrcDisp);
   void dumpStack(const char* msg, int offset) const;
 
   void emitFallbackJmp(SrcRec& dest, ConditionCode cc = CC_NZ);
@@ -631,14 +593,23 @@ private:
 
 const size_t kTrampolinesBlockSize = 8 << 12;
 
-// minimum length in bytes of each trampoline code sequence
-// Note that if stats is on, then this size is ~24 bytes due to the
-// instrumentation code that counts the number of calls through each
-// trampoline
-const size_t kMinPerTrampolineSize = 11;
+/*
+ * Roughly expected length in bytes of each trampoline code sequence.
+ *
+ * Note that if stats is on, then this size is ~24 bytes due to the
+ * instrumentation code that counts the number of calls through each
+ * trampoline.
+ *
+ * When a small jump fits, it is only 7 bytes.  When it's a large jump
+ * (followed by ud2) we have 11 bytes.
+ *
+ * We assume 11 bytes is the good size to expect, since stats are only
+ * used for debugging modes.
+ */
+const size_t kExpectedPerTrampolineSize = 11;
 
 const size_t kMaxNumTrampolines = kTrampolinesBlockSize /
-  kMinPerTrampolineSize;
+  kExpectedPerTrampolineSize;
 
 void fcallHelperThunk() asm ("__fcallHelperThunk");
 void funcBodyHelperThunk() asm ("__funcBodyHelperThunk");

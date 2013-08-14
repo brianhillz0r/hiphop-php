@@ -383,7 +383,6 @@ CALL_OPCODE(ConvStrToDbl);
 CALL_OPCODE(ConvCellToDbl);
 
 CALL_OPCODE(ConvArrToInt);
-CALL_OPCODE(ConvDblToInt);
 CALL_OPCODE(ConvObjToInt);
 CALL_OPCODE(ConvStrToInt);
 CALL_OPCODE(ConvCellToInt);
@@ -1224,6 +1223,53 @@ void CodeGenerator::cgNegateWork(SSATmp* dst, SSATmp* src) {
   cgUnaryIntOp(dst, src, &Asm::neg, [](int64_t i) { return -i; });
 }
 
+void CodeGenerator::cgAbsInt(IRInstruction* inst) {
+  auto src = inst->src(0);
+  auto dst = inst->dst(0);
+
+  auto srcReg = m_regs[src].reg();
+  auto dstReg = m_regs[dst].reg();
+
+  if (srcReg == InvalidReg) {
+    int64_t srcVal = src->getValInt();
+    emitLoadImm(m_as, srcVal < 0 ? -srcVal : srcVal, dstReg);
+    return;
+  }
+
+  // fast integer absolute value:
+  // dst = ((src >> 63) ^ src) - (src >> 63)
+  emitMovRegReg(m_as, srcReg, m_rScratch);
+  emitMovRegReg(m_as, srcReg, dstReg);
+
+  m_as.    sarq  (63, m_rScratch);
+  m_as.    xorq  (m_rScratch, dstReg);
+  m_as.    subq  (m_rScratch, dstReg);
+}
+
+void CodeGenerator::cgAbsDbl(IRInstruction* inst) {
+  auto src = inst->src(0);
+  auto dst = inst->dst(0);
+
+  auto srcReg = m_regs[src].reg();
+  auto dstReg = m_regs[dst].reg();
+
+  if (srcReg == InvalidReg) {
+    double srcVal = src->getValDbl();
+    emitLoadImm(m_as, srcVal < 0 ? -srcVal : srcVal, dstReg);
+    return;
+  }
+
+  auto resReg = dstReg.isXMM() ? dstReg : PhysReg(rCgXMM0);
+
+  emitMovRegReg(m_as, srcReg, resReg);
+
+  // clear the high bit
+  m_as.    psllq  (1, resReg);
+  m_as.    psrlq  (1, resReg);
+
+  emitMovRegReg(m_as, resReg, dstReg);
+}
+
 inline static Reg8 convertToReg8(PhysReg reg) { return rbyte(reg); }
 inline static Reg64 convertToReg64(PhysReg reg) { return reg; }
 
@@ -1938,19 +1984,20 @@ void CodeGenerator::cgGte(IRInstruction* inst) {
 // Type check operators
 ///////////////////////////////////////////////////////////////////////////////
 
-// Overloads to put the ObjectData* into a register so emitTypeTest
-// can cmp to the Class* expected by the specialized Type
+// Overloads to put the {Object,Array}Data* into a register so
+// emitTypeTest can cmp to the Class*/ArrayKind expected by the
+// specialized Type
 
 // Nothing to do, return the register that contain the ObjectData already
-Reg64 getObjectDataEnregistered(Asm& as, PhysReg dataSrc, Reg64 scratch) {
+Reg64 getDataPtrEnregistered(Asm& as, PhysReg dataSrc, Reg64 scratch) {
   return dataSrc;
 }
 
 // Enregister the meoryRef so it can be used with an offset by the
 // cmp instruction
-Reg64 getObjectDataEnregistered(Asm& as,
-                                MemoryRef dataSrc,
-                                Reg64 scratch) {
+Reg64 getDataPtrEnregistered(Asm& as,
+                             MemoryRef dataSrc,
+                             Reg64 scratch) {
   as.loadq(dataSrc, scratch);
   return scratch;
 }
@@ -1987,8 +2034,12 @@ void CodeGenerator::emitTypeTest(Type type, Loc1 typeSrc, Loc2 dataSrc,
   if (type.strictSubtypeOf(Type::Obj) || type.strictSubtypeOf(Type::Res)) {
     // emit the specific class test
     assert(type.getClass()->attrs() & AttrFinal);
-    auto reg = getObjectDataEnregistered(m_as, dataSrc, m_rScratch);
+    auto reg = getDataPtrEnregistered(m_as, dataSrc, m_rScratch);
     m_as.cmpq(type.getClass(), reg[ObjectData::getVMClassOffset()]);
+    doJcc(cc);
+  } else if (type.subtypeOf(Type::Arr) && type.hasArrayKind()) {
+    auto reg = getDataPtrEnregistered(m_as, dataSrc, m_rScratch);
+    m_as.cmpb(type.getArrayKind(), reg[ArrayData::offsetofKind()]);
     doJcc(cc);
   }
 }
@@ -2231,6 +2282,64 @@ asm_label(a, falseLabel);
   a.    xorl   (r32(rdst), r32(rdst));
 
 asm_label(a, out);
+}
+
+void CodeGenerator::cgConvDblToInt(IRInstruction* inst) {
+  auto dst = inst->dst();
+  auto src = inst->src(0);
+
+  auto srcReg = prepXMMReg(src, m_as, m_regs, rCgXMM0);
+  auto dstReg = m_regs[dst].reg();
+
+  if (dstReg == InvalidReg) {
+    return;
+  }
+
+  constexpr uint64_t indefiniteInteger = 0x8000000000000000LL;
+  constexpr uint64_t maxULongAsDouble  = 0x43F0000000000000LL;
+  constexpr uint64_t maxLongAsDouble   = 0x43E0000000000000LL;
+
+  m_as.    cvttsd2siq   (srcReg, dstReg);
+  m_as.    cmpq         (indefiniteInteger, dstReg);
+
+  unlikelyIfBlock(CC_E, [&] (Asm& a) {
+    // result > max signed int or unordered
+    a.    pxor_xmm_xmm       (rCgXMM1, rCgXMM1);
+    a.    ucomisd_xmm_xmm    (rCgXMM1, srcReg);
+
+    ifThen(a, CC_B, [&] {
+      // src0 > 0 (CF = 1 -> less than 0 or unordered)
+      Label isUnordered;
+      a.   jp8     (isUnordered);
+
+      emitLoadImm(a, maxULongAsDouble, rCgXMM1);
+
+      a.   ucomisd_xmm_xmm    (rCgXMM1, srcReg);
+
+      ifThenElse(a, CC_B, [&] {
+        // src0 > ULONG_MAX
+        a.    xorq    (dstReg, dstReg);
+
+      }, [&] {
+        // 0 < src0 <= ULONG_MAX
+        emitLoadImm(a, maxLongAsDouble, rCgXMM1);
+        emitMovRegReg(a, srcReg, rCgXMM0);
+
+        // we know that LONG_MAX < src0 <= UINT_MAX, therefore,
+        // 0 < src0 - ULONG_MAX <= LONG_MAX
+        a.    subsd_xmm_xmm    (rCgXMM1, rCgXMM0);
+        a.    cvttsd2siq       (rCgXMM0, dstReg);
+
+        // We want to simulate integer overflow so we take the resulting integer
+        // and flip its sign bit (NB: we don't use orq here because it's
+        // possible that src0 == LONG_MAX in which case cvttsd2siq will yeild
+        // an indefiniteInteger, which we would like to make zero)
+        a.    xorq             (indefiniteInteger, dstReg);
+      });
+
+      asm_label(a, isUnordered);
+    });
+  });
 }
 
 void CodeGenerator::cgConvDblToBool(IRInstruction* inst) {
@@ -4520,6 +4629,17 @@ void CodeGenerator::cgGuardCls(IRInstruction* inst) {
   m_tx64->emitFallbackCondJmp(m_as, *destSR, ccNegate(CC_E));
 }
 
+void CodeGenerator::cgGuardArrayKind(IRInstruction* inst) {
+  auto const srcReg = m_regs[inst->src(0)].reg();
+  auto const type = inst->typeParam();
+  assert(type.canSpecializeArrayKind() && type.hasArrayKind());
+  static_assert(sizeof(ArrayData::ArrayKind) == 1, "");
+  m_as.cmpb(type.getArrayKind(), srcReg[ArrayData::offsetofKind()]);
+  auto const destSK = SrcKey(curFunc(), m_curTrace->bcOff());
+  auto const destSR = m_tx64->getSrcRec(destSK);
+  m_tx64->emitFallbackCondJmp(m_as, *destSR, ccNegate(CC_E));
+}
+
 void CodeGenerator::cgCheckLoc(IRInstruction* inst) {
   auto const rbase = m_regs[inst->src(0)].reg();
   auto const baseOff = localOffset(inst->extra<CheckLoc>()->locId);
@@ -5133,7 +5253,9 @@ void CodeGenerator::cgLdCns(IRInstruction* inst) {
   cgLoad(rVmTl, ch, inst);
 }
 
-static Cell lookupCnsHelper(const TypedValue* tv, StringData* nm) {
+static Cell lookupCnsHelper(const TypedValue* tv,
+                            StringData* nm,
+                            bool error) {
   assert(tv->m_type == KindOfUninit);
   Cell *cns = nullptr;
   Cell c1;
@@ -5150,9 +5272,13 @@ static Cell lookupCnsHelper(const TypedValue* tv, StringData* nm) {
       cns = Unit::loadCns(const_cast<StringData*>(nm));
     }
     if (UNLIKELY(!cns)) {
-      raise_notice(Strings::UNDEFINED_CONSTANT, nm->data(), nm->data());
-      c1.m_data.pstr = const_cast<StringData*>(nm);
-      c1.m_type = KindOfStaticString;
+      if (error) {
+        raise_error("Undefined constant '%s'", nm->data());
+      } else {
+        raise_notice(Strings::UNDEFINED_CONSTANT, nm->data(), nm->data());
+        c1.m_data.pstr = const_cast<StringData*>(nm);
+        c1.m_type = KindOfStaticString;
+      }
     } else {
       c1.m_type = cns->m_type;
       c1.m_data = cns->m_data;
@@ -5161,7 +5287,7 @@ static Cell lookupCnsHelper(const TypedValue* tv, StringData* nm) {
   return c1;
 }
 
-void CodeGenerator::cgLookupCns(IRInstruction* inst) {
+void CodeGenerator::cgLookupCnsCommon(IRInstruction* inst) {
   SSATmp* cnsNameTmp = inst->src(0);
 
   assert(inst->typeParam() == Type::Cell);
@@ -5172,9 +5298,84 @@ void CodeGenerator::cgLookupCns(IRInstruction* inst) {
 
   ArgGroup args(m_regs);
   args.addr(rVmTl, ch)
-      .immPtr(cnsName);
+      .immPtr(cnsName)
+      .imm(inst->op() == LookupCnsE);
 
   cgCallHelper(m_as, CppCall(lookupCnsHelper),
+               callDestTV(inst->dst()),
+               SyncOptions::kSyncPoint, args);
+}
+
+void CodeGenerator::cgLookupCns(IRInstruction* inst) {
+  cgLookupCnsCommon(inst);
+}
+
+void CodeGenerator::cgLookupCnsE(IRInstruction* inst) {
+  cgLookupCnsCommon(inst);
+}
+
+static Cell lookupCnsUHelper(const TypedValue* tv,
+                             StringData* nm,
+                             StringData* fallback) {
+  Cell *cns = nullptr;
+  Cell c1;
+
+  // lookup qualified name in thread-local constants
+  bool cacheConsts = TargetCache::s_constants != nullptr;
+  if (UNLIKELY(cacheConsts)) {
+    cns = TargetCache::s_constants->HphpArray::nvGet(nm);
+  }
+  if (!cns) {
+    cns = Unit::loadCns(const_cast<StringData*>(nm));
+  }
+
+  // try cache handle for unqualified name
+  if (UNLIKELY(!cns && tv->m_type != KindOfUninit)) {
+    cns = const_cast<Cell*>(tv);
+  }
+
+  // lookup unqualified name in thread-local constants
+  if (UNLIKELY(!cns)) {
+    if (UNLIKELY(cacheConsts)) {
+      cns = TargetCache::s_constants->HphpArray::nvGet(fallback);
+    }
+    if (!cns) {
+      cns = Unit::loadCns(const_cast<StringData*>(fallback));
+    }
+    if (UNLIKELY(!cns)) {
+      raise_notice(Strings::UNDEFINED_CONSTANT,
+                   fallback->data(), fallback->data());
+      c1.m_data.pstr = const_cast<StringData*>(fallback);
+      c1.m_type = KindOfStaticString;
+    }
+  } else {
+    c1.m_type = cns->m_type;
+    c1.m_data = cns->m_data;
+  }
+  return c1;
+}
+
+void CodeGenerator::cgLookupCnsU(IRInstruction* inst) {
+  SSATmp* cnsNameTmp = inst->src(0);
+  SSATmp* fallbackNameTmp = inst->src(1);
+
+  assert(inst->typeParam() == Type::Cell);
+  assert(cnsNameTmp->isConst() && cnsNameTmp->type() == Type::StaticStr);
+  assert(fallbackNameTmp->isConst() &&
+         fallbackNameTmp->type() == Type::StaticStr);
+
+  const StringData* cnsName = cnsNameTmp->getValStr();
+
+  const StringData* fallbackName = fallbackNameTmp->getValStr();
+  TargetCache::CacheHandle fallbackCh =
+    StringData::DefCnsHandle(fallbackName, false);
+
+  ArgGroup args(m_regs);
+  args.addr(rVmTl, fallbackCh)
+      .immPtr(cnsName)
+      .immPtr(fallbackName);
+
+  cgCallHelper(m_as, CppCall(lookupCnsUHelper),
                callDestTV(inst->dst()),
                SyncOptions::kSyncPoint, args);
 }
